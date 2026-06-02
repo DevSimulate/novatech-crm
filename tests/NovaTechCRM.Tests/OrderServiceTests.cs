@@ -52,8 +52,6 @@ public class OrderServiceTests
         // Act
         var result = await sut.PlaceOrderAsync(order);
 
-        // Assert — this test currently FAILS because the bug causes the order
-        // to be fulfilled without waiting for the fraud check result.
         Assert.NotEqual(OrderStatus.Fulfilled, result.Status);
         Assert.Equal(OrderStatus.Rejected, result.Status);
     }
@@ -94,5 +92,50 @@ public class OrderServiceTests
         var result = await sut.PlaceOrderAsync(order);
 
         Assert.Equal(OrderStatus.Fulfilled, result.Status);
+    }
+
+    [Fact]
+    public async Task PlaceOrder_FraudCheckReceivesCancellationTokenNone_SoClientDisconnectCannotLeaveOrderStuck()
+    {
+        // Arrange — pass a pre-cancelled token to simulate a disconnected client
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        var order = new Order
+        {
+            CustomerId = "cust-003",
+            TotalAmount = 750m, // Medium risk — this was the affected range
+            Items = new List<OrderItem>
+            {
+                new() { ProductSku = "SKU-B", ProductName = "Mid-range Item", Quantity = 1, UnitPrice = 750m }
+            }
+        };
+
+        _fraudMock
+            .Setup(f => f.CheckAsync(It.IsAny<Order>(), CancellationToken.None))
+            .ReturnsAsync(new FraudCheckResult
+            {
+                CheckId = "chk-003",
+                Passed = true,
+                RiskLevel = FraudRiskLevel.Medium,
+                Reason = "Automated check passed"
+            });
+
+        _repoMock
+            .Setup(r => r.SaveAsync(It.IsAny<Order>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+
+        _notifMock
+            .Setup(n => n.SendOrderConfirmationAsync(It.IsAny<Order>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+
+        var sut = CreateSut();
+
+        // Act — even with a cancelled HTTP-request token, fulfillment must complete
+        var result = await sut.PlaceOrderAsync(order, cts.Token);
+
+        // Assert — fraud check and fulfillment used CancellationToken.None, not the cancelled token
+        Assert.Equal(OrderStatus.Fulfilled, result.Status);
+        _fraudMock.Verify(f => f.CheckAsync(It.IsAny<Order>(), CancellationToken.None), Times.Once);
     }
 }

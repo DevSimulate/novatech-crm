@@ -90,6 +90,7 @@ builder.Services.AddScoped<INotificationRepository, NotificationRepository>();
 
 // ── Services ─────────────────────────────────────────────────────────────────
 builder.Services.AddScoped<OrderService>();
+builder.Services.AddScoped<IFraudShieldService, FraudShieldService>();
 builder.Services.AddScoped<ICustomerService, CustomerService>();
 builder.Services.AddScoped<IInvoiceService, InvoiceService>();
 builder.Services.AddScoped<IPaymentService, PaymentService>();
