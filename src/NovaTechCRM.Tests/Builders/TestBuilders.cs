@@ -52,6 +52,7 @@ public class InvoiceBuilder
     public InvoiceBuilder WithStatus(InvoiceStatus s)    { _status     = s;      return this; }
     public InvoiceBuilder WithTotal(decimal t)           { _total      = t;      return this; }
     public InvoiceBuilder WithAmountPaid(decimal a)      { _amountPaid = a;      return this; }
+    public InvoiceBuilder WithDueAt(DateTime d)          { _dueAt = d;           return this; }
     public InvoiceBuilder Overdue()                      { _dueAt = DateTime.UtcNow.AddDays(-10); return this; }
 
     public Invoice Build() => new()
