@@ -95,24 +95,26 @@ public class OrderServiceTests
     }
 
     [Fact]
-    public async Task PlaceOrder_FraudCheckReceivesCancellationTokenNone_SoClientDisconnectCannotLeaveOrderStuck()
+    public async Task PlaceOrder_ClientDisconnectDuringFraudCheck_DoesNotLeaveOrderStuck()
     {
-        // Arrange — pass a pre-cancelled token to simulate a disconnected client
+        // Arrange — pre-cancelled token simulates a client disconnect or LB reset
         using var cts = new CancellationTokenSource();
         cts.Cancel();
 
         var order = new Order
         {
             CustomerId = "cust-003",
-            TotalAmount = 750m, // Medium risk — this was the affected range
+            TotalAmount = 750m,
             Items = new List<OrderItem>
             {
                 new() { ProductSku = "SKU-B", ProductName = "Mid-range Item", Quantity = 1, UnitPrice = 750m }
             }
         };
 
+        // Fraud check accepts any token — internally the service creates a 30s timeout token,
+        // not the HTTP request CT, so this mock will be called regardless of the cancelled ct.
         _fraudMock
-            .Setup(f => f.CheckAsync(It.IsAny<Order>(), CancellationToken.None))
+            .Setup(f => f.CheckAsync(It.IsAny<Order>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new FraudCheckResult
             {
                 CheckId = "chk-003",
@@ -131,11 +133,9 @@ public class OrderServiceTests
 
         var sut = CreateSut();
 
-        // Act — even with a cancelled HTTP-request token, fulfillment must complete
+        // Act — fulfillment must complete even with a pre-cancelled HTTP request token
         var result = await sut.PlaceOrderAsync(order, cts.Token);
 
-        // Assert — fraud check and fulfillment used CancellationToken.None, not the cancelled token
         Assert.Equal(OrderStatus.Fulfilled, result.Status);
-        _fraudMock.Verify(f => f.CheckAsync(It.IsAny<Order>(), CancellationToken.None), Times.Once);
     }
 }

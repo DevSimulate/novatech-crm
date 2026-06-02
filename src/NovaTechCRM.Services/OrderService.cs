@@ -28,13 +28,13 @@ public class OrderService
         order.Status = OrderStatus.FraudCheckPending;
         await _orderRepo.SaveAsync(order, ct);
 
-        // Decouple from the HTTP request's CancellationToken here. Once the order is
-        // persisted, the fraud check and fulfillment must complete regardless of whether
-        // the client disconnects. Passing the request CT to CheckAsync caused ~$500+ orders
-        // (Medium/High risk, slower fraud API path) to be permanently stuck in FraudCheckPending
-        // whenever a client timeout or load-balancer reset cancelled the token mid-flight.
-        // The OperationCanceledException was silently swallowed at the Kestrel level (no error logs).
-        var fraudResult = await _fraudShield.CheckAsync(order, CancellationToken.None);
+        // Decouple from the HTTP request CT once the order is in the DB. Propagating the
+        // request CT caused Medium/High-risk orders (≥$500, slower fraud path) to be
+        // permanently stuck in FraudCheckPending whenever a client disconnect or LB reset
+        // cancelled the token mid-flight — silently swallowed at the Kestrel level.
+        // Use a dedicated timeout token so a hung fraud API cannot block threads forever.
+        using var fraudCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var fraudResult = await _fraudShield.CheckAsync(order, fraudCts.Token);
 
         if (!fraudResult.Passed)
         {
