@@ -1,3 +1,4 @@
+using System.Data;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using NovaTechCRM.Domain.Models;
@@ -16,6 +17,9 @@ public interface ICustomerRepository
     Task<IReadOnlyList<Customer>> GetActiveSinceAsync(DateTime since, CancellationToken ct = default);
     Task<IReadOnlyList<Customer>> GetByTierAsync(CustomerTier tier, CancellationToken ct = default);
     Task BulkUpdateTierAsync(IEnumerable<int> customerIds, CustomerTier tier, CancellationToken ct = default);
+
+    // Dashboard stats — aggregates + recent orders computed in SQL (no full-history transfer).
+    Task<CustomerOrderStats> GetCustomerOrderStatsAsync(int customerId, CancellationToken ct = default);
 
     // Legacy — kept for backward compat with old reporting queries
     Task<List<OrderSummary>> GetOrderSummariesAsync(int customerId, CancellationToken ct = default);
@@ -115,6 +119,71 @@ public class CustomerRepository : ICustomerRepository
     }
 
     // --- Legacy ADO.NET below — these predate EF Core being added to this project ---
+
+    // Powers the customer dashboard. Aggregates (count/revenue) and the 10 most recent
+    // orders are both computed in SQL, in a single round trip, so cost no longer scales
+    // with the customer's total order history.
+    //
+    // NOTE (NOVA-52): this query relies on an index on Orders(CustomerId) and
+    // LineItems(OrderId) to stay fast on large/legacy customers. Prod is on migration
+    // v18 and migrations are applied manually by infra (see NovaTechDbContext), so the
+    // index is NOT created here. Have infra apply:
+    //     CREATE INDEX IX_Orders_CustomerId ON Orders (CustomerId) INCLUDE (Status, CreatedAt);
+    //     CREATE INDEX IX_LineItems_OrderId ON LineItems (OrderId) INCLUDE (Quantity, UnitPrice);
+    public async Task<CustomerOrderStats> GetCustomerOrderStatsAsync(
+        int customerId, CancellationToken ct = default)
+    {
+        await using var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(ct);
+
+        await using var cmd = new SqlCommand(@"
+            SELECT COUNT(*)                  AS TotalOrders,
+                   COALESCE(SUM(t.Total), 0) AS TotalRevenue
+            FROM (
+                SELECT o.Id, SUM(li.Quantity * li.UnitPrice) AS Total
+                FROM Orders o
+                JOIN LineItems li ON li.OrderId = o.Id
+                WHERE o.CustomerId = @cid
+                GROUP BY o.Id
+            ) t;
+
+            SELECT TOP (10) o.Id, o.Status, o.CreatedAt,
+                   SUM(li.Quantity * li.UnitPrice) AS Total
+            FROM Orders o
+            JOIN LineItems li ON li.OrderId = o.Id
+            WHERE o.CustomerId = @cid
+            GROUP BY o.Id, o.Status, o.CreatedAt
+            ORDER BY o.CreatedAt DESC;", conn);
+
+        // CustomerId is a string column (see Order.CustomerId). Bind a string parameter so
+        // the predicate stays sargable — binding an int forces a per-row CONVERT on the
+        // column, which makes any index on Orders(CustomerId) unusable (full scan).
+        cmd.Parameters.Add("@cid", SqlDbType.NVarChar, 100).Value = customerId.ToString();
+
+        var stats = new CustomerOrderStats();
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+
+        if (await reader.ReadAsync(ct))
+        {
+            stats.TotalOrders  = reader.GetInt32(0);
+            stats.TotalRevenue = reader.GetDecimal(1);
+        }
+
+        await reader.NextResultAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            stats.RecentOrders.Add(new OrderSummary
+            {
+                OrderId   = reader.GetInt32(0),
+                Status    = reader.GetString(1),
+                CreatedAt = reader.GetDateTime(2),
+                Total     = reader.GetDecimal(3),
+            });
+        }
+
+        return stats;
+    }
 
     public async Task<List<OrderSummary>> GetOrderSummariesAsync(
         int customerId, CancellationToken ct = default)

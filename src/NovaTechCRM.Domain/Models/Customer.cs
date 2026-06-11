@@ -96,6 +96,15 @@ public class OrderSummary
     public decimal Total { get; set; }
 }
 
+// Aggregates computed server-side for the customer dashboard, so we never have to
+// transfer or re-aggregate a customer's full order history in memory.
+public class CustomerOrderStats
+{
+    public int TotalOrders { get; set; }
+    public decimal TotalRevenue { get; set; }
+    public List<OrderSummary> RecentOrders { get; set; } = new();
+}
+
 public class CustomerDashboard
 {
     public int CustomerId { get; set; }
