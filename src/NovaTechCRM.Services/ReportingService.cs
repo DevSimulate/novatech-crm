@@ -13,6 +13,8 @@ public class ReportingService : IReportingService
 {
     private readonly ICustomerRepository _customerRepo;
 
+    // NOTE: unbounded and never invalidated — serves stale dashboards and leaks memory.
+    // Tracked as a follow-up; the SQL-side fix above makes the first (uncached) load fast.
     private static readonly ConcurrentDictionary<int, CustomerDashboard> _reportingCache = new();
 
     public ReportingService(ICustomerRepository customerRepo)
