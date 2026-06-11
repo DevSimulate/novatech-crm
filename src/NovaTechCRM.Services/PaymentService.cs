@@ -164,6 +164,10 @@ public class PaymentService : IPaymentService
         return payment;
     }
 
+    public async Task<PaymentMethod?> GetPaymentMethodByIdAsync(
+        Guid paymentMethodId, CancellationToken ct = default) =>
+        await _paymentRepo.GetPaymentMethodByIdAsync(paymentMethodId, ct);
+
     public async Task<PaymentMethod> SavePaymentMethodAsync(
         int customerId, PaymentMethod method, CancellationToken ct = default)
     {

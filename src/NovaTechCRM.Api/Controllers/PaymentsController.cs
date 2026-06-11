@@ -141,7 +141,12 @@ public class PaymentsController : BaseController
     [HttpDelete("methods/{paymentMethodId:guid}")]
     public async Task<IActionResult> DeleteMethod(Guid paymentMethodId, CancellationToken ct)
     {
-        // TODO: verify ownership before deleting — copy-paste issue from GetMethod above (NOVA-84)
+        var method = await _payments.GetPaymentMethodByIdAsync(paymentMethodId, ct);
+        if (method is null) return NotFound();
+
+        if (!IsAdmin && method.CustomerId != CurrentCustomerId)
+            return Forbid();
+
         await _payments.DeletePaymentMethodAsync(paymentMethodId, ct);
         return NoContent();
     }
