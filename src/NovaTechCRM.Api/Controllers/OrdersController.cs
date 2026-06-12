@@ -32,6 +32,10 @@ public class OrdersController : ControllerBase
         };
 
         var placed = await _orderService.PlaceOrderAsync(order, ct);
+
+        if (placed.Status == OrderStatus.Rejected)
+            return UnprocessableEntity(new { error = "ORDER_REJECTED", message = "Order did not pass the fraud check and will not be fulfilled.", orderId = placed.Id });
+
         return CreatedAtAction(nameof(GetOrder), new { id = placed.Id }, placed);
     }
 

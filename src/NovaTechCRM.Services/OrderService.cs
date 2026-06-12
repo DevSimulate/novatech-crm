@@ -28,14 +28,20 @@ public class OrderService
         order.Status = OrderStatus.FraudCheckPending;
         await _orderRepo.SaveAsync(order, ct);
 
-        var fraudResult = await _fraudShield.CheckAsync(order, ct);
+        // Decouple from the HTTP request CT once the order is in the DB. Propagating the
+        // request CT caused Medium/High-risk orders (≥$500, slower fraud path) to be
+        // permanently stuck in FraudCheckPending whenever a client disconnect or LB reset
+        // cancelled the token mid-flight — silently swallowed at the Kestrel level.
+        // Use a dedicated timeout token so a hung fraud API cannot block threads forever.
+        using var fraudCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var fraudResult = await _fraudShield.CheckAsync(order, fraudCts.Token);
 
         if (!fraudResult.Passed)
         {
             order.Status = OrderStatus.Rejected;
             order.FraudCheckPassed = false;
-            await _orderRepo.SaveAsync(order, ct);
-            await _notifications.SendFraudAlertAsync(order, fraudResult, ct);
+            await _orderRepo.SaveAsync(order, CancellationToken.None);
+            await _notifications.SendFraudAlertAsync(order, fraudResult, CancellationToken.None);
             _logger.LogWarning("Order {OrderId} rejected by FraudShield: risk={RiskLevel}, reason={Reason}",
                 order.Id, fraudResult.RiskLevel, fraudResult.Reason);
             return order;
@@ -43,19 +49,18 @@ public class OrderService
 
         order.FraudCheckId = fraudResult.CheckId;
         order.FraudCheckPassed = true;
-        await FulfillOrderAsync(order, ct);
+        await FulfillOrderAsync(order);
 
         return order;
     }
 
-    private async Task FulfillOrderAsync(Order order, CancellationToken ct = default)
+    private async Task FulfillOrderAsync(Order order)
     {
-        // This runs without knowing the fraud check outcome — the race condition.
         order.Status = OrderStatus.Fulfilled;
         order.FulfilledAt = DateTime.UtcNow;
-        await _orderRepo.SaveAsync(order, ct);
+        await _orderRepo.SaveAsync(order, CancellationToken.None);
 
-        await _notifications.SendOrderConfirmationAsync(order, ct);
+        await _notifications.SendOrderConfirmationAsync(order, CancellationToken.None);
 
         _logger.LogInformation("Order {OrderId} fulfilled for customer {CustomerId} (amount: {Amount:C})",
             order.Id, order.CustomerId, order.TotalAmount);
