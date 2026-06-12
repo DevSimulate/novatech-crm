@@ -47,17 +47,16 @@ public class BillingService : IBillingService
         if (customers.Count == 0)
             return 0;
 
-        // NOTE: Order.CustomerId is a string column. We convert Customer.Id (int) to string
-        // so the IN list is string-to-string with no implicit type conversion on the DB side.
-        // Before deploying to prod, verify no format mismatch exists:
-        //   SELECT DISTINCT CustomerId FROM Orders
-        //   WHERE CustomerId NOT IN (SELECT CAST(Id AS NVARCHAR(20)) FROM Customers)
-        var customerIdStrings = customers.Select(c => c.Id.ToString()).ToHashSet();
-
         // Query 2: all fulfilled orders for the period across all active customers at once.
+        // Uses a subquery instead of a client-side IN list to avoid SQL Server's 2,100
+        // parameter limit, which would silently drop customers or throw on large tenants.
+        var activeCustomerIds = _db.Customers
+            .Where(c => c.Status == CustomerStatus.Active)
+            .Select(c => c.Id.ToString());
+
         var allOrders = await _db.Orders
             .Include(o => o.Items)
-            .Where(o => customerIdStrings.Contains(o.CustomerId)
+            .Where(o => activeCustomerIds.Contains(o.CustomerId)
                      && o.Status == OrderStatus.Fulfilled
                      && o.CreatedAt >= periodStart
                      && o.CreatedAt <  periodEnd)
