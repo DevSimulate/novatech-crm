@@ -13,6 +13,8 @@ public class ReportingService : IReportingService
 {
     private readonly ICustomerRepository _customerRepo;
 
+    // NOTE: unbounded and never invalidated — serves stale dashboards and leaks memory.
+    // Tracked as a follow-up; the SQL-side fix above makes the first (uncached) load fast.
     private static readonly ConcurrentDictionary<int, CustomerDashboard> _reportingCache = new();
 
     public ReportingService(ICustomerRepository customerRepo)
@@ -28,16 +30,18 @@ public class ReportingService : IReportingService
         var customer = await _customerRepo.GetByIdAsync(customerId, ct);
         if (customer is null) return null;
 
-        var orders = await _customerRepo.GetOrderSummariesAsync(customerId, ct);
+        var stats = await _customerRepo.GetCustomerOrderStatsAsync(customerId, ct);
 
         var dashboard = new CustomerDashboard
         {
             CustomerId = customer.Id,
             CustomerName = customer.Name,
-            TotalOrders = orders.Count,
-            TotalRevenue = orders.Sum(o => o.Total),
-            AverageOrderValue = orders.Count > 0 ? orders.Average(o => o.Total) : 0,
-            RecentOrders = orders.Take(10).ToList(),
+            TotalOrders = stats.TotalOrders,
+            TotalRevenue = stats.TotalRevenue,
+            AverageOrderValue = stats.TotalOrders > 0
+                ? stats.TotalRevenue / stats.TotalOrders
+                : 0,
+            RecentOrders = stats.RecentOrders,
         };
 
         _reportingCache[customerId] = dashboard;

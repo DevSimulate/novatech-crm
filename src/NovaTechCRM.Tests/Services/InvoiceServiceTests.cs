@@ -150,6 +150,45 @@ public class InvoiceServiceTests
     }
 
     [Fact]
+    public async Task ProcessOverdueAsync_DoesNotNotify_WhenWithinThreeBusinessDayGracePeriod()
+    {
+        // 1 calendar day past due — within the 3 business day grace period
+        var invoice = new InvoiceBuilder()
+            .WithStatus(InvoiceStatus.Issued)
+            .WithDueAt(DateTime.UtcNow.AddDays(-1))
+            .Build();
+
+        _invoiceRepo.Setup(r => r.GetByStatusAsync(InvoiceStatus.Issued, default))
+            .ReturnsAsync(new List<Invoice> { invoice });
+
+        await CreateSut().ProcessOverdueAsync();
+
+        _notify.Verify(n => n.SendInvoiceOverdueAsync(It.IsAny<Invoice>(), default), Times.Never);
+        _invoiceRepo.Verify(r => r.UpdateAsync(It.IsAny<Invoice>(), default), Times.Never);
+        Assert.Equal(InvoiceStatus.Issued, invoice.Status);
+    }
+
+    [Fact]
+    public async Task ProcessOverdueAsync_MarksOverdueAndNotifies_AfterGracePeriodExpires()
+    {
+        // 10 calendar days past due — guaranteed to exceed the 3 business day grace period
+        var invoice = new InvoiceBuilder()
+            .WithStatus(InvoiceStatus.Issued)
+            .Overdue()
+            .Build();
+
+        _invoiceRepo.Setup(r => r.GetByStatusAsync(InvoiceStatus.Issued, default))
+            .ReturnsAsync(new List<Invoice> { invoice });
+        _invoiceRepo.Setup(r => r.UpdateAsync(It.IsAny<Invoice>(), default))
+            .ReturnsAsync((Invoice i, CancellationToken _) => i);
+
+        await CreateSut().ProcessOverdueAsync();
+
+        Assert.Equal(InvoiceStatus.Overdue, invoice.Status);
+        _notify.Verify(n => n.SendInvoiceOverdueAsync(invoice, default), Times.Once);
+    }
+
+    [Fact]
     public async Task CreateFromOrderAsync_CalculatesTotalsFromLineItems()
     {
         var order = Orders.Simple();

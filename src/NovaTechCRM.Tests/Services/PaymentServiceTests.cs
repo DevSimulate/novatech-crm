@@ -189,6 +189,34 @@ public class PaymentServiceTests
             Times.Once);
     }
 
+    // NOVA-84: GetPaymentMethodByIdAsync is the read used by DeleteMethod to enforce ownership.
+    // It must return null for a soft-deleted method so that a deleted card's ID cannot be
+    // re-submitted and receive a Forbid (which would leak that the ID once existed).
+    [Fact]
+    public async Task GetPaymentMethodByIdAsync_ReturnsNull_WhenMethodNotFound()
+    {
+        var id = Guid.NewGuid();
+        _paymentRepo.Setup(r => r.GetPaymentMethodByIdAsync(id, default))
+            .ReturnsAsync((PaymentMethod?)null);
+
+        var result = await CreateSut().GetPaymentMethodByIdAsync(id);
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public async Task GetPaymentMethodByIdAsync_ReturnsMethod_WhenFound()
+    {
+        var method = new PaymentMethod { Id = Guid.NewGuid(), CustomerId = 7 };
+        _paymentRepo.Setup(r => r.GetPaymentMethodByIdAsync(method.Id, default))
+            .ReturnsAsync(method);
+
+        var result = await CreateSut().GetPaymentMethodByIdAsync(method.Id);
+
+        Assert.NotNull(result);
+        Assert.Equal(7, result.CustomerId);
+    }
+
     [Fact]
     public async Task ChargeAsync_SetsPaymentToFailed_WhenProviderThrows()
     {

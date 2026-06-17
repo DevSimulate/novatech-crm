@@ -51,6 +51,12 @@ public class PaymentRepository : IPaymentRepository
         await _db.SaveChangesAsync(ct);
     }
 
+    public async Task<PaymentMethod?> GetPaymentMethodByIdAsync(
+        Guid paymentMethodId, CancellationToken ct = default)
+        => await _db.PaymentMethods
+            .AsNoTracking()
+            .FirstOrDefaultAsync(m => m.Id == paymentMethodId && !m.IsDeleted, ct);
+
     public async Task<IReadOnlyList<PaymentMethod>> GetPaymentMethodsAsync(
         int customerId, CancellationToken ct = default)
         => await _db.PaymentMethods

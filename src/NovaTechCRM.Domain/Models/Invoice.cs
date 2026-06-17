@@ -1,3 +1,5 @@
+using NovaTechCRM.Domain.ValueObjects;
+
 namespace NovaTechCRM.Domain.Models;
 
 // Invoice status flow:
@@ -80,8 +82,9 @@ public class Invoice
     public string? RecurrencePattern { get; set; } // "MONTHLY", "QUARTERLY" etc
     public Guid? ParentInvoiceId { get; set; }
 
+    // Contract requires 3 business days grace before an overdue notice may be sent.
     public bool IsOverdue => Status == InvoiceStatus.Issued
-                             && DateTime.UtcNow > DueAt
+                             && BusinessDays.Add(DueAt, BusinessDays.OverdueGracePeriod) < DateTime.UtcNow
                              && AmountDue > 0;
 
     // void an invoice — doesn't delete, creates audit trail

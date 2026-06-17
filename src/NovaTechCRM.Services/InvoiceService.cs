@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging;
 using NovaTechCRM.Domain.Models;
 using NovaTechCRM.Domain.Exceptions;
+using NovaTechCRM.Domain.ValueObjects;
 using NovaTechCRM.Repositories;
 using NovaTechCRM.Services.Interfaces;
 
@@ -220,13 +221,12 @@ public class InvoiceService : IInvoiceService
         var overdue = await _invoiceRepo.GetByStatusAsync(InvoiceStatus.Issued, ct);
         var now     = DateTime.UtcNow;
 
-        foreach (var invoice in overdue.Where(i => i.DueAt < now && i.AmountDue > 0))
+        foreach (var invoice in overdue.Where(i => BusinessDays.Add(i.DueAt, BusinessDays.OverdueGracePeriod) < now && i.AmountDue > 0))
         {
             invoice.Status    = InvoiceStatus.Overdue;
             invoice.UpdatedAt = now;
             await _invoiceRepo.UpdateAsync(invoice, ct);
 
-            // send overdue notification — TODO: add configurable grace period (NOVA-64)
             await _notifications.SendInvoiceOverdueAsync(invoice, ct);
 
             _logger.LogWarning("Invoice {Number} marked overdue ({Days} days late)",
