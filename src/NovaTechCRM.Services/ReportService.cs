@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging;
 using NovaTechCRM.Domain.Models;
 using NovaTechCRM.Repositories;
@@ -12,7 +13,7 @@ public class ReportService : IReportService
     private readonly ICacheService _cache;
     private readonly ILogger<ReportService> _logger;
 
-    private static readonly Dictionary<Guid, CancellationTokenSource> _activeReports = new();
+    private static readonly ConcurrentDictionary<Guid, CancellationTokenSource> _activeReports = new();
 
     public ReportService(
         IReportRepository reportRepo,
@@ -48,7 +49,7 @@ public class ReportService : IReportService
         var created = await _reportRepo.CreateAsync(report, ct);
 
         var cts = new CancellationTokenSource();
-        _activeReports[created.Id] = cts;  // BUG: never cleaned up if exception thrown before ProcessPending
+        _activeReports[created.Id] = cts;
 
         _logger.LogInformation("Report {ReportId} queued: {Type}", created.Id, type);
 
@@ -68,15 +69,15 @@ public class ReportService : IReportService
 
         foreach (var report in pending)
         {
-            if (!_activeReports.TryGetValue(report.Id, out var cts))
+            if (!_activeReports.TryRemove(report.Id, out var cts))
                 continue;
-
-            report.Status    = ReportStatus.Running;
-            report.StartedAt = DateTime.UtcNow;
-            await _reportRepo.UpdateAsync(report, ct);
 
             try
             {
+                report.Status    = ReportStatus.Running;
+                report.StartedAt = DateTime.UtcNow;
+                await _reportRepo.UpdateAsync(report, ct);
+
                 var data = await GenerateReportDataAsync(report, cts.Token);
                 report.ResultJson     = data;
                 report.Status         = ReportStatus.Completed;
@@ -84,18 +85,17 @@ public class ReportService : IReportService
                 await _reportRepo.UpdateAsync(report, ct);
 
                 _logger.LogInformation("Report {ReportId} completed", report.Id);
-                _activeReports.Remove(report.Id);
-                cts.Dispose();
             }
             catch (Exception ex)
             {
                 report.Status       = ReportStatus.Failed;
                 report.ErrorMessage = ex.Message;
                 await _reportRepo.UpdateAsync(report, ct);
-
-                _activeReports.Remove(report.Id);
-                cts.Dispose();
                 _logger.LogError(ex, "Report {ReportId} failed", report.Id);
+            }
+            finally
+            {
+                cts.Dispose();
             }
         }
     }
