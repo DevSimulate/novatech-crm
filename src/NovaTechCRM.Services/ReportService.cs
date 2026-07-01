@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging;
 using NovaTechCRM.Domain.Models;
 using NovaTechCRM.Repositories;
@@ -12,20 +13,7 @@ public class ReportService : IReportService
     private readonly ICacheService _cache;
     private readonly ILogger<ReportService> _logger;
 
-    // NOVA-74: Memory leak.
-    // _activeReports is a static dictionary that maps reportId -> cancellation token source.
-    // It is added to on every ReportService instantiation (DI creates one per request in some configs).
-    // Completed/failed reports are removed by ProcessPendingAsync, but that job runs every 5 min.
-    // Under load, hundreds of entries accumulate between runs. Over 24h on a busy server
-    // this grows to tens of thousands of entries and is never GC'd (static reference).
-    // Fix: use a proper distributed job queue (Hangfire/Quartz) instead of this static map.
-    private static readonly Dictionary<Guid, CancellationTokenSource> _activeReports = new();
-
-    // same issue — static event list grows on every new ReportService instance
-    private static readonly List<EventHandler<Report>> _onReportCompleted = new();
-
-    // another one — added for "quick" dashboard stats caching, never cleared
-    private static readonly Dictionary<string, object> _statsCache = new();
+    private static readonly ConcurrentDictionary<Guid, CancellationTokenSource> _activeReports = new();
 
     public ReportService(
         IReportRepository reportRepo,
@@ -37,14 +25,6 @@ public class ReportService : IReportService
         _orderRepo  = orderRepo;
         _cache      = cache;
         _logger     = logger;
-
-        // BUG: this fires on every DI resolution, adding a new entry to static list each time
-        _onReportCompleted.Add(OnReportCompletedHandler);
-    }
-
-    private void OnReportCompletedHandler(object? sender, Report report)
-    {
-        _logger.LogInformation("Report {ReportId} completed", report.Id);
     }
 
     public async Task<Report> RequestAsync(
@@ -69,7 +49,7 @@ public class ReportService : IReportService
         var created = await _reportRepo.CreateAsync(report, ct);
 
         var cts = new CancellationTokenSource();
-        _activeReports[created.Id] = cts;  // BUG: never cleaned up if exception thrown before ProcessPending
+        _activeReports[created.Id] = cts;
 
         _logger.LogInformation("Report {ReportId} queued: {Type}", created.Id, type);
 
@@ -89,36 +69,33 @@ public class ReportService : IReportService
 
         foreach (var report in pending)
         {
-            if (!_activeReports.TryGetValue(report.Id, out var cts))
+            if (!_activeReports.TryRemove(report.Id, out var cts))
                 continue;
-
-            report.Status    = ReportStatus.Running;
-            report.StartedAt = DateTime.UtcNow;
-            await _reportRepo.UpdateAsync(report, ct);
 
             try
             {
+                report.Status    = ReportStatus.Running;
+                report.StartedAt = DateTime.UtcNow;
+                await _reportRepo.UpdateAsync(report, ct);
+
                 var data = await GenerateReportDataAsync(report, cts.Token);
                 report.ResultJson     = data;
                 report.Status         = ReportStatus.Completed;
                 report.CompletedAt    = DateTime.UtcNow;
                 await _reportRepo.UpdateAsync(report, ct);
 
-                // notify handlers
-                foreach (var handler in _onReportCompleted)
-                    handler(this, report);
-
-                // ONLY place we remove from static dict — if exception above, entry leaks
-                _activeReports.Remove(report.Id);
+                _logger.LogInformation("Report {ReportId} completed", report.Id);
             }
             catch (Exception ex)
             {
                 report.Status       = ReportStatus.Failed;
                 report.ErrorMessage = ex.Message;
                 await _reportRepo.UpdateAsync(report, ct);
-
-                // BUG: missing _activeReports.Remove(report.Id) here
                 _logger.LogError(ex, "Report {ReportId} failed", report.Id);
+            }
+            finally
+            {
+                cts.Dispose();
             }
         }
     }
@@ -134,10 +111,9 @@ public class ReportService : IReportService
 
     private async Task<string> GenerateSalesSummaryAsync(Report report, CancellationToken ct)
     {
-        // cache key — put in static dict, never expires (another small leak)
         var cacheKey = $"sales_{report.PeriodStart:yyyyMMdd}_{report.PeriodEnd:yyyyMMdd}";
-        if (_statsCache.TryGetValue(cacheKey, out var cached))
-            return cached?.ToString() ?? "{}";
+        var cached   = await _cache.GetAsync<string>(cacheKey, ct);
+        if (cached != null) return cached;
 
         var orders = await _orderRepo.GetByDateRangeAsync(report.PeriodStart, report.PeriodEnd, ct);
         var json   = System.Text.Json.JsonSerializer.Serialize(orders.Select(o => new
@@ -145,7 +121,7 @@ public class ReportService : IReportService
             o.Id, o.CustomerId, o.TotalAmount, o.Status, o.CreatedAt
         }));
 
-        _statsCache[cacheKey] = json;  // grows forever, keys never evicted
+        await _cache.SetAsync(cacheKey, json, TimeSpan.FromMinutes(30), ct);
         return json;
     }
 
